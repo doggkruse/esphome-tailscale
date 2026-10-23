@@ -19,23 +19,12 @@ packages:
     files:
       - packages/tailscale/tailscale.yaml
 
-# PSRAM init — uncomment the block matching your hardware (the
-# `esp32-s3-devkitc-1` board defaults configure octal/80MHz, which works
-# only on N8R8 / N16R8 modules — quad-PSRAM N8R2 / N16R2 boards need an
-# explicit override). Note: ESPHome's `psram:` block forces the configured
-# mode, it does NOT auto-detect; the octal block does NOT work on quad
-# hardware and vice versa. See README → Troubleshooting → "Device Memory
-# shows Internal RAM" if PSRAM detection seems wrong.
-#
-# For N8R8 / N16R8 modules (8 MB Octal PSRAM, most common):
-# psram:
-#   mode: octal
-#   speed: 80MHz
-#
-# For N8R2 / N16R2 modules (2 MB Quad PSRAM):
-# psram:
-#   mode: quad
-#   speed: 40MHz
+# Configure the actual RAM fitted to this example's ESP32-S3 board.
+# This example uses N8R8/N16R8 octal PSRAM. For N8R2/N16R2, use quad/40MHz.
+# Boards without PSRAM should omit this block; tailscale.no_psram defaults to auto.
+psram:
+  mode: octal
+  speed: 80MHz
 
 tailscale:
   auth_key: !secret tailscale_auth_key

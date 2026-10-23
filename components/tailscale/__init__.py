@@ -1,6 +1,9 @@
 import os
+import re
+from esphome.core import CORE
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.const import (
     CONF_ID,
     STATE_CLASS_MEASUREMENT,
@@ -18,15 +21,64 @@ AUTO_LOAD = ["binary_sensor", "text_sensor", "sensor", "button", "switch", "text
 
 
 def _validate_network(config):
-    """Validate that either wifi or ethernet is configured."""
-    import esphome.core as core
-
-    full = core.CORE.raw_config
+    """Resolve the memory profile after every component has been validated."""
+    full = fv.full_config.get()
     if "wifi" not in full and "ethernet" not in full:
         raise cv.Invalid(
             "The tailscale component requires either 'wifi:' or 'ethernet:' "
             "to be configured. Add one of them to your YAML."
         )
+    psram_enabled = "psram" in full and not full["psram"].get("disabled", False)
+    if config[CONF_NO_PSRAM] == "auto":
+        config[CONF_NO_PSRAM] = not psram_enabled
+    # Preserve upstream telemetry on PSRAM; default it off to save internal
+    # memory on no-PSRAM. An explicit choice remains supported in either profile.
+    config.setdefault(CONF_DISABLE_TELEMETRY, config[CONF_NO_PSRAM])
+    if config[CONF_NO_PSRAM]:
+        if psram_enabled:
+            raise cv.Invalid("no_psram: true cannot be combined with an enabled 'psram:' component")
+    elif not psram_enabled:
+        raise cv.Invalid("no_psram: false requires an enabled 'psram:' component; configure PSRAM or select no_psram: auto")
+    # Final validation sees defaults and package-expanded PSRAM configuration.
+    # Resolve peers here too: the schema cannot know the other component's state.
+    config.setdefault(CONF_MAX_PEERS, 2 if config[CONF_NO_PSRAM] else 16)
+    framework = full.get("esp32", {}).get("framework", {})
+    sdkconfig = framework.get("sdkconfig_options", {})
+    if "CONFIG_ML_NO_PSRAM" in sdkconfig:
+        raise cv.Invalid("CONFIG_ML_NO_PSRAM is controlled by tailscale.no_psram; remove the manual sdkconfig option")
+    if "CONFIG_SPIRAM" in sdkconfig:
+        expected = "n" if config[CONF_NO_PSRAM] else "y"
+        if sdkconfig["CONFIG_SPIRAM"] != expected:
+            raise cv.Invalid(
+                f"CONFIG_SPIRAM must be '{expected}' for the selected tailscale.no_psram profile; "
+                "remove the conflicting manual sdkconfig option"
+            )
+    # Preserve upstream's supported 64 KiB minimum for the normal YAML knob;
+    # the constrained profile also permits smaller ceilings. This is a
+    # configuration range, not a protocol limit.
+    minimum = 16 if config[CONF_NO_PSRAM] else 64
+    profile = "no-PSRAM" if config[CONF_NO_PSRAM] else "PSRAM"
+    if CONF_NETMAP_BUFFER_KB in config and not minimum <= config[CONF_NETMAP_BUFFER_KB] <= 2048:
+        raise cv.Invalid(
+            f"netmap_buffer_kb must be between {minimum} and 2048 KiB for the {profile} profile"
+        )
+    if config[CONF_NO_PSRAM]:
+        for name in ("CONFIG_ML_H2_BUFFER_SIZE_KB", "CONFIG_ML_JSON_BUFFER_SIZE_KB"):
+            if name not in sdkconfig:
+                continue
+            # These raw literals also enter C headers, where leading zero means
+            # octal. Check the constrained profile's new range without changing
+            # upstream's handling of normal-profile manual SDK settings.
+            if not isinstance(sdkconfig[name], str) or not re.fullmatch(r"[1-9][0-9]*", sdkconfig[name]):
+                raise cv.Invalid(f"{name} must be a decimal integer size in KiB")
+            try:
+                size = int(sdkconfig[name], 10)
+            except (TypeError, ValueError) as exc:
+                raise cv.Invalid(f"{name} must be a decimal integer size in KiB") from exc
+            if not minimum <= size <= 2048:
+                raise cv.Invalid(
+                    f"{name} must be between {minimum} and 2048 KiB for the {profile} profile"
+                )
     return config
 
 
@@ -42,6 +94,7 @@ CONF_DERP_TLS_VERIFY = "derp_tls_verify"
 CONF_NETCHECK_OVERRIDE_THRESHOLD = "netcheck_override_threshold"
 CONF_IPN_VERSION = "ipn_version"
 CONF_NETMAP_BUFFER_KB = "netmap_buffer_kb"
+CONF_NO_PSRAM = "no_psram"
 tailscale_ns = cg.esphome_ns.namespace("tailscale")
 TailscaleComponent = tailscale_ns.class_("TailscaleComponent", cg.Component)
 
@@ -50,9 +103,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(TailscaleComponent),
         cv.Required(CONF_AUTH_KEY): cv.string,
         cv.Optional(CONF_HOSTNAME, default=""): cv.string,
-        cv.Optional(CONF_MAX_PEERS, default=16): cv.int_range(min=1, max=64),
+        cv.Optional(CONF_NO_PSRAM, default="auto"): cv.Any(cv.boolean, cv.one_of("auto", lower=True)),
+        cv.Optional(CONF_MAX_PEERS): cv.int_range(min=1, max=64),
         cv.Optional(CONF_LOGIN_SERVER, default=""): cv.string,
-        cv.Optional(CONF_DISABLE_TELEMETRY, default=False): cv.boolean,
+        cv.Optional(CONF_DISABLE_TELEMETRY): cv.boolean,
         # Measure every DERP region and adopt the fastest one instead of the
         # region the control plane echoed back. Off by default: a home-region
         # change has to be announced to every peer, so it is disruptive, and
@@ -71,17 +125,10 @@ CONFIG_SCHEMA = cv.Schema(
         # Set it only to clear the admin console's "Device is too old" gate,
         # e.g. ipn_version: "1.98.9". See README (Troubleshooting).
         cv.Optional(CONF_IPN_VERSION, default=""): cv.string,
-        # Size (KB) of the PSRAM buffer microlink allocates for a netmap fetch
-        # (and afterwards of the long-poll accumulator). Since #48 the fetch
-        # needs one such block, not two. Without PSRAM nothing is pre-allocated
-        # and this is only the upper limit for the tailnet map. The Kconfig default (512) is sized for
-        # 300+ peer tailnets; on a 2 MB-PSRAM board that shares PSRAM with
-        # other components the 2 x 512 KB allocation fails and every
-        # MapRequest dies within milliseconds of a successful registration
-        # (#45). 128 is plenty below ~50 peers. No default here on purpose:
-        # unset leaves the Kconfig value (and any sdkconfig_options override)
-        # untouched, so existing builds do not change.
-        cv.Optional(CONF_NETMAP_BUFFER_KB): cv.int_range(min=64, max=2048),
+        # Optional shared ceiling for the receive/JSON map buffers. Omission
+        # keeps upstream's Kconfig defaults (512 KB each), or 40 KB each for
+        # the no-PSRAM profile. This is not a supported tailnet size.
+        cv.Optional(CONF_NETMAP_BUFFER_KB): cv.int_range(min=16, max=2048),
     }
 )
 
@@ -118,15 +165,6 @@ async def to_code(config):
     # sdkconfig so the compiled ceiling matches the runtime intent.
     add_idf_sdkconfig_option("CONFIG_ML_MAX_PEERS", config[CONF_MAX_PEERS])
 
-    # Both MapResponse buffers are compile-time Kconfig sizes (microlink_internal.h
-    # derives ML_H2_BUFFER_SIZE / ML_JSON_BUFFER_SIZE from them). One YAML knob
-    # sets both - the Kconfig help says to keep them equal. Only emitted when the
-    # user asked for it, so the Kconfig default / a manual sdkconfig_options
-    # override keeps working unchanged (#45).
-    if CONF_NETMAP_BUFFER_KB in config:
-        add_idf_sdkconfig_option("CONFIG_ML_H2_BUFFER_SIZE_KB", config[CONF_NETMAP_BUFFER_KB])
-        add_idf_sdkconfig_option("CONFIG_ML_JSON_BUFFER_SIZE_KB", config[CONF_NETMAP_BUFFER_KB])
-
     # Sensors are created via platform YAML files (binary_sensor.py, text_sensor.py, sensor.py)
     # They are auto-loaded and auto-configured - user doesn't need to add them manually
 
@@ -139,11 +177,20 @@ async def to_code(config):
     override_h = f"{ml_base}/ml_config_override.h"
 
     # Required ESP-IDF sdkconfig for Tailscale/WireGuard
-    add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
-    add_idf_sdkconfig_option("CONFIG_SPIRAM_IGNORE_NOTFOUND", True)
-    add_idf_sdkconfig_option("CONFIG_SPIRAM_MODE_OCT", True)
-    add_idf_sdkconfig_option("CONFIG_SPIRAM_SPEED_80M", True)
-    add_idf_sdkconfig_option("CONFIG_LWIP_IP_FORWARD", True)
+    # ESPHome processes the framework settings before this component. Do not
+    # overwrite a manually supplied limit when applying component defaults.
+    manual_sdkconfig = CORE.config["esp32"]["framework"].get("sdkconfig_options", {})
+    no_psram = config[CONF_NO_PSRAM]
+    add_idf_sdkconfig_option("CONFIG_ML_NO_PSRAM", no_psram)
+    netmap_size = config.get(CONF_NETMAP_BUFFER_KB, 40 if no_psram else None)
+    for name in ("CONFIG_ML_H2_BUFFER_SIZE_KB", "CONFIG_ML_JSON_BUFFER_SIZE_KB"):
+        if name not in manual_sdkconfig and netmap_size is not None:
+            add_idf_sdkconfig_option(name, netmap_size)
+    if no_psram and "CONFIG_ML_NVS_MAX_PEERS" not in manual_sdkconfig:
+        add_idf_sdkconfig_option("CONFIG_ML_NVS_MAX_PEERS", 16)
+    # PSRAM mode belongs to the board's explicit psram: configuration.
+
+    add_idf_sdkconfig_option("CONFIG_LWIP_IP_FORWARD", not no_psram)
     add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
     add_idf_sdkconfig_option("CONFIG_LWIP_CHECK_THREAD_SAFETY", False)
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_SOCKETS", 24)

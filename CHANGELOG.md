@@ -10,6 +10,15 @@ once a `1.0.0` release is cut. While the version is still in the `0.x` range,
 
 ## [Unreleased]
 
+### Added
+- Bounded experimental no-PSRAM endpoint profile with ESPHome-owned PSRAM
+  selection, reduced peer/queue budgets, allocation/receive/admission limits
+  and focused configuration, ownership and two-profile build coverage.
+
+### Migration
+- Existing installations relying on implicit PSRAM setup must declare `psram:`.
+  PSRAM mode, speed, ECC and initialization remain owned by ESPHome.
+
 ## [0.5.28] — 2026-10-20
 
 ### Fixed

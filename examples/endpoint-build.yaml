@@ -1,0 +1,30 @@
+# Compile-only fixture. Do not flash these placeholder credentials.
+esphome:
+  name: tailscale-wroom-endpoint
+esp32:
+  board: esp32dev
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_LWIP_TCPIP_TASK_STACK_SIZE: "6144"
+external_components:
+  - source: ../components
+logger:
+api:
+  reboot_timeout: 0s
+ota:
+  - platform: esphome
+wifi:
+  ssid: compile-only-not-a-real-network
+  password: compile-only-password
+  power_save_mode: NONE
+  reboot_timeout: 0s
+tailscale:
+  auth_key: compile-only-not-an-auth-key
+  max_peers: 2
+  disable_telemetry: true
+
+time:
+  - platform: sntp
+    id: system_clock

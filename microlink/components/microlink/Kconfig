@@ -1,5 +1,17 @@
 menu "MicroLink V2 Configuration"
 
+    config ML_NO_PSRAM
+        bool "Opt in to the experimental no-PSRAM memory profile"
+        default n
+        help
+            Use reduced task stacks, queues, map/cache limits and compact
+            relay storage for the ESPHome WROOM integration. The upstream
+            no-PSRAM receive and protocol paths are retained. This is an
+            explicit profile, not runtime PSRAM detection. Leave disabled to
+            retain the baseline PSRAM resource budgets. ESPHome resolves
+            tailscale.no_psram at build time from the enabled psram component
+            by default; true/false explicitly require a matching configuration.
+
     config ML_ZERO_COPY_WG
         bool "Enable zero-copy WireGuard receive (high-throughput mode)"
         default n
@@ -72,7 +84,8 @@ menu "MicroLink V2 Configuration"
     config ML_H2_BUFFER_SIZE_KB
         int "HTTP/2 receive buffer size (KB)"
         default 512
-        range 64 2048
+        range 16 2048 if ML_NO_PSRAM
+        range 64 2048 if !ML_NO_PSRAM
         help
             Size of the PSRAM-allocated buffer for receiving HTTP/2 frames
             from the Tailscale control plane (MapResponse).
@@ -89,7 +102,8 @@ menu "MicroLink V2 Configuration"
     config ML_JSON_BUFFER_SIZE_KB
         int "JSON parse buffer size (KB)"
         default 512
-        range 64 2048
+        range 16 2048 if ML_NO_PSRAM
+        range 64 2048 if !ML_NO_PSRAM
         help
             Size of the PSRAM-allocated buffer for parsing JSON MapResponse
             data. cJSON builds an in-memory DOM tree that uses 2-3x the

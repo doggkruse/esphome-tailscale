@@ -149,6 +149,10 @@ esp_err_t ml_stun_resolve_servers(microlink_t *ml) {
     struct addrinfo *res = NULL;
 
     /* Determine primary STUN host — use parsed DERPMap home region if available */
+#ifdef CONFIG_ML_NO_PSRAM
+    char primary_host_copy[64];
+    xSemaphoreTake(ml->derp_map_mutex, portMAX_DELAY);
+#endif
     const char *primary_host = ML_STUN_PRIMARY_HOST;
     uint16_t primary_port = ML_STUN_PRIMARY_PORT;
 
@@ -179,6 +183,12 @@ esp_err_t ml_stun_resolve_servers(microlink_t *ml) {
             }
         }
     }
+
+#ifdef CONFIG_ML_NO_PSRAM
+    snprintf(primary_host_copy, sizeof(primary_host_copy), "%s", primary_host);
+    primary_host = primary_host_copy;
+    xSemaphoreGive(ml->derp_map_mutex);
+#endif
 
     /* Resolve primary: Tailscale DERP STUN server (if not already resolved from DERPMap IPv4) */
     static const uint8_t zero16[16] = {0};

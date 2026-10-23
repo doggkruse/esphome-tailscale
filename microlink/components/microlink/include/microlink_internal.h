@@ -63,19 +63,35 @@ extern "C" {
 #define ML_CORE(n) (n)
 #endif
 
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_TASK_NET_IO_STACK (5 * 1024)
+#else
 #define ML_TASK_NET_IO_STACK    (6 * 1024)   /* was 8K; ~3K peak observed */
+#endif
 #define ML_TASK_NET_IO_PRIO     7
 #define ML_TASK_NET_IO_CORE     0
 
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_TASK_DERP_TX_STACK 5632
+#else
 #define ML_TASK_DERP_TX_STACK   (10 * 1024)  /* was 14K; ~3.7K peak observed */
+#endif
 #define ML_TASK_DERP_TX_PRIO    5
 #define ML_TASK_DERP_TX_CORE    0
 
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_TASK_COORD_STACK 5632
+#else
 #define ML_TASK_COORD_STACK     (12 * 1024)
+#endif
 #define ML_TASK_COORD_PRIO      5
 #define ML_TASK_COORD_CORE      ML_CORE(1)
 
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_TASK_WG_MGR_STACK 4608
+#else
 #define ML_TASK_WG_MGR_STACK    (8 * 1024)
+#endif
 #define ML_TASK_WG_MGR_PRIO     7
 #define ML_TASK_WG_MGR_CORE     ML_CORE(1)
 
@@ -83,15 +99,27 @@ extern "C" {
 /* TX 16->64 (2026-05-27): absorb speedtest bursts so packets queue instead of
  * being dropped at enqueue; relay buffers are SPIRAM-backed (ml_psram_malloc),
  * the queue control struct itself is ~64×48B internal (negligible). */
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_DERP_TX_QUEUE_DEPTH 8
+#else
 #define ML_DERP_TX_QUEUE_DEPTH  64
+#endif
 #define ML_DISCO_RX_QUEUE_DEPTH 8
 /* WG RX 8->32 (2026-05-27): download-direction frames arrive in bursts via DERP;
  * depth 8 overflowed and silently dropped → TCP loss → exit-node throughput
  * collapse. ml_rx_packet_t is small (ptr+len+meta); 32 is ~1KB internal. */
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_WG_RX_QUEUE_DEPTH 16
+#else
 #define ML_WG_RX_QUEUE_DEPTH    32
+#endif
 #define ML_STUN_RX_QUEUE_DEPTH  4
 #define ML_COORD_CMD_QUEUE_DEPTH 4
+#ifdef CONFIG_ML_NO_PSRAM
+#define ML_PEER_UPDATE_QUEUE_DEPTH 8
+#else
 #define ML_PEER_UPDATE_QUEUE_DEPTH 400
+#endif
 
 /* Protocol limits */
 #define ML_MAX_PEERS            CONFIG_ML_MAX_PEERS
@@ -409,26 +437,7 @@ typedef struct {
  * (16 MB); anything beyond what fits in one read buffer can never complete. */
 #define ML_H2_MAX_FRAME_LEN     32768
 
-#define ML_MAX_DERP_REGIONS     32
-#define ML_MAX_DERP_NODES       4
-
-typedef struct {
-    char hostname[64];
-    char ipv4[16];
-    char ipv6[46];
-    uint16_t stun_port;     /* 0 = default 3478 */
-    uint16_t derp_port;     /* 0 = default 443 */
-    bool stun_only;         /* true if node only serves STUN, not DERP */
-} ml_derp_node_t;
-
-typedef struct {
-    uint16_t region_id;
-    char code[8];           /* e.g. "dfw", "nyc", "sfo" */
-    char name[24];          /* e.g. "Frankfurt", "New York" — from DERPMap RegionName */
-    ml_derp_node_t nodes[ML_MAX_DERP_NODES];
-    uint8_t node_count;
-    bool avoid;             /* true if region should be avoided */
-} ml_derp_region_t;
+#include "ml_derp_store.h"
 
 /* ============================================================================
  * Noise Protocol State (owned exclusively by coord task)
@@ -600,6 +609,9 @@ struct microlink_s {
     /* DERP map (parsed from MapResponse, owned by coord task) */
     ml_derp_region_t derp_regions[ML_MAX_DERP_REGIONS];
     uint8_t derp_region_count;
+#ifdef CONFIG_ML_NO_PSRAM
+    SemaphoreHandle_t derp_map_mutex;
+#endif
     uint16_t derp_home_region;     /* Currently active region (netcheck override may have replaced the default) */
     uint16_t derp_region_default;  /* Configured default region — config.preferred_derp_region or ML_DERP_REGION fallback. The control plane itself does NOT send an independent suggestion; tailscale Go semantics. */
 

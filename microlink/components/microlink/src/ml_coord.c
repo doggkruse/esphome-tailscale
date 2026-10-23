@@ -1382,8 +1382,17 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
              pos, (unsigned long)(ML_H2_BUFFER_SIZE / 1024));
 
     /* Read and process server's response (SETTINGS, SETTINGS_ACK, WINDOW_UPDATE, etc.) */
+#ifdef CONFIG_ML_NO_PSRAM
+    /* The constrained task cannot reserve 4 KiB on its permanent stack for
+     * this one startup reply. Use upstream's wire-sized receive allocation. */
+    uint8_t *recv_buf = NULL;
+    size_t recv_cap = 0;
+    int recv_len = noise_recv_into(ml, noise, &recv_buf, 0, &recv_cap, 4096, true);
+    free(recv_buf);
+#else
     uint8_t recv_buf[4096];
     int recv_len = noise_recv(ml, noise, recv_buf, sizeof(recv_buf));
+#endif
     if (recv_len < 0) {
         ESP_LOGW(TAG, "No immediate H2 response from server (may come later)");
         /* Not fatal - server may send its frames later */
@@ -2297,7 +2306,22 @@ static int add_endpoints_to_json(microlink_t *ml, cJSON *root) {
 static void derp_map_add_region(microlink_t *ml, cJSON *region_obj) {
     if (ml->derp_region_count >= ML_MAX_DERP_REGIONS) return;
     ml_derp_region_t *r = &ml->derp_regions[ml->derp_region_count];
+#ifdef CONFIG_ML_NO_PSRAM
+    cJSON *node_array = cJSON_GetObjectItem(region_obj, "Nodes");
+    size_t node_capacity = cJSON_GetArraySize(node_array);
+    if (node_capacity > ML_MAX_DERP_NODES) node_capacity = ML_MAX_DERP_NODES;
+    size_t name_lengths[ML_MAX_DERP_NODES] = {0};
+    for (size_t i = 0; i < node_capacity; i++) {
+        cJSON *name = cJSON_GetObjectItem(cJSON_GetArrayItem(node_array, i), "HostName");
+        if (cJSON_IsString(name)) name_lengths[i] = strnlen(name->valuestring, 63);
+    }
+    if (!ml_derp_region_allocate_names(r, node_capacity, name_lengths, ml_psram_malloc)) {
+        ESP_LOGW(TAG, "DERP region allocation failed (%u nodes)", (unsigned)node_capacity);
+        return;
+    }
+#else
     memset(r, 0, sizeof(*r));
+#endif
 
     cJSON *rid = cJSON_GetObjectItem(region_obj, "RegionID");
     if (rid) r->region_id = (uint16_t)rid->valuedouble;
@@ -2322,11 +2346,17 @@ static void derp_map_add_region(microlink_t *ml, cJSON *region_obj) {
         cJSON_ArrayForEach(node_obj, nodes) {
             if (r->node_count >= ML_MAX_DERP_NODES) break;
             ml_derp_node_t *n = &r->nodes[r->node_count];
+#ifndef CONFIG_ML_NO_PSRAM
             memset(n, 0, sizeof(*n));
+#endif
 
             cJSON *hn = cJSON_GetObjectItem(node_obj, "HostName");
             if (hn && hn->valuestring) {
+#ifdef CONFIG_ML_NO_PSRAM
+                memcpy(n->hostname, hn->valuestring, name_lengths[r->node_count]);
+#else
                 strncpy(n->hostname, hn->valuestring, sizeof(n->hostname) - 1);
+#endif
             }
 
             cJSON *ip4 = cJSON_GetObjectItem(node_obj, "IPv4");
@@ -2334,10 +2364,12 @@ static void derp_map_add_region(microlink_t *ml, cJSON *region_obj) {
                 strncpy(n->ipv4, ip4->valuestring, sizeof(n->ipv4) - 1);
             }
 
+#ifndef CONFIG_ML_NO_PSRAM
             cJSON *ip6 = cJSON_GetObjectItem(node_obj, "IPv6");
             if (ip6 && ip6->valuestring) {
                 strncpy(n->ipv6, ip6->valuestring, sizeof(n->ipv6) - 1);
             }
+#endif
 
             cJSON *sp = cJSON_GetObjectItem(node_obj, "STUNPort");
             if (sp) n->stun_port = (uint16_t)sp->valuedouble;
@@ -2356,10 +2388,16 @@ static void derp_map_add_region(microlink_t *ml, cJSON *region_obj) {
              r->region_id, r->code, r->node_count,
              r->avoid ? " [avoid]" : "");
     for (int ni = 0; ni < r->node_count; ni++) {
+#ifdef CONFIG_ML_NO_PSRAM
+        ESP_LOGI(TAG, "    node: %s (v4=%s stun=%d derp=%d%s)",
+                 r->nodes[ni].hostname,
+                 r->nodes[ni].ipv4[0] ? r->nodes[ni].ipv4 : "-",
+#else
         ESP_LOGI(TAG, "    node: %s (v4=%s v6=%s stun=%d derp=%d%s)",
                  r->nodes[ni].hostname,
                  r->nodes[ni].ipv4[0] ? r->nodes[ni].ipv4 : "-",
                  r->nodes[ni].ipv6[0] ? r->nodes[ni].ipv6 : "-",
+#endif
                  r->nodes[ni].stun_port ? r->nodes[ni].stun_port : 3478,
                  r->nodes[ni].derp_port ? r->nodes[ni].derp_port : 443,
                  r->nodes[ni].stun_only ? " stun-only" : "");
@@ -2486,12 +2524,19 @@ static bool parse_derp_map_from_response(microlink_t *ml, cJSON *map_json) {
     cJSON *regions = cJSON_GetObjectItem(derp_map, "Regions");
     if (!regions) return false;
 
+#ifdef CONFIG_ML_NO_PSRAM
+    xSemaphoreTake(ml->derp_map_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < ML_MAX_DERP_REGIONS; i++) ml_derp_region_clear(&ml->derp_regions[i]);
+#endif
     ml->derp_region_count = 0;
     cJSON *region_obj;
     cJSON_ArrayForEach(region_obj, regions) {
         if (ml->derp_region_count >= ML_MAX_DERP_REGIONS) break;
         derp_map_add_region(ml, region_obj);
     }
+#ifdef CONFIG_ML_NO_PSRAM
+    xSemaphoreGive(ml->derp_map_mutex);
+#endif
     return derp_map_finish(ml);
 }
 
@@ -2664,8 +2709,15 @@ static bool map_sliced_derp(microlink_t *ml) {
     ml_json_object it;
     ml_json_slice k, v;
     if (!ml_json_object_init(&it, regions)) return false;
+#ifndef CONFIG_ML_NO_PSRAM
     const int previous_count = ml->derp_region_count;
+#endif
     int failed = 0;
+#ifdef CONFIG_ML_NO_PSRAM
+    /* Dynamic node storage must be released before replacing the region map. */
+    xSemaphoreTake(ml->derp_map_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < ML_MAX_DERP_REGIONS; i++) ml_derp_region_clear(&ml->derp_regions[i]);
+#endif
     ml->derp_region_count = 0;
     while (ml_json_object_next(&it, &k, &v)) {
         if (ml->derp_region_count >= ML_MAX_DERP_REGIONS) break;
@@ -2674,15 +2726,26 @@ static bool map_sliced_derp(microlink_t *ml) {
             failed++;
             continue;
         }
+#ifdef CONFIG_ML_NO_PSRAM
+        int before = ml->derp_region_count;
+#endif
         derp_map_add_region(ml, region);
+#ifdef CONFIG_ML_NO_PSRAM
+        if (ml->derp_region_count == before) failed++;
+#endif
         cJSON_Delete(region);
     }
+#ifdef CONFIG_ML_NO_PSRAM
+    xSemaphoreGive(ml->derp_map_mutex);
+#endif
     if (failed > 0) {
         ESP_LOGW(TAG, "%d DERP region(s) failed to parse (out of memory?)", failed);
         if (ml->derp_region_count == 0) {
+#ifndef CONFIG_ML_NO_PSRAM
             /* Nothing was written, so the table is intact: keep the old one
              * rather than committing an empty map. */
             ml->derp_region_count = previous_count;
+#endif
             return false;
         }
     }

@@ -104,23 +104,22 @@ void TailscaleComponent::setup() {
     }
   } else {
     this->psram_available_ = false;
-    // #48: experimental no-PSRAM mode. Every buffer comes from internal RAM and
-    // is sized from what actually arrives; netmap_buffer_kb is only the upper
-    // limit. Fits a small tailnet on a chip with enough free heap (measured on
-    // an ESP32-C3), not a classic ESP32 next to other large components.
+#ifdef CONFIG_ML_NO_PSRAM
     ESP_LOGW(TAG, "No PSRAM - EXPERIMENTAL no-PSRAM mode: buffers come from internal RAM "
                   "(free %u KB, largest block %u KB). Netmap limit %u KB.",
              (unsigned) (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
              (unsigned) (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
              (unsigned) CONFIG_ML_H2_BUFFER_SIZE_KB);
-#ifdef CONFIG_SPIRAM
-    // This chip family can have PSRAM, so "none" may also be a config mistake.
+#else
+    ESP_LOGE(TAG, "No PSRAM detected for the PSRAM profile; Tailscale cannot start.");
     ESP_LOGW(TAG, "If your board has PSRAM but it's not initialized, add an explicit psram block to your YAML:");
     ESP_LOGW(TAG, "    psram:");
     ESP_LOGW(TAG, "      mode: octal");
     ESP_LOGW(TAG, "      speed: 80MHz    # for N8R8 / N16R8 modules (most common)");
     ESP_LOGW(TAG, "  or, for N8R2 / N16R2 modules: 'mode: quad speed: 40MHz'.");
     ESP_LOGW(TAG, "ESPHome's psram block forces the configured mode — pick the one that matches your hardware.");
+    this->mark_failed();
+    return;
 #endif
   }
 

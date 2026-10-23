@@ -793,6 +793,10 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
      * Always start from node 0 (the first/preferred node in the DERPMap).
      * Only rotate to a different node after a SUCCESSFUL connection drops,
      * NOT on connection failure (to avoid bouncing between nodes). */
+#ifdef CONFIG_ML_NO_PSRAM
+    char host_copy[64];
+    xSemaphoreTake(ml->derp_map_mutex, portMAX_DELAY);
+#endif
     const char *derp_host = ML_DERP_HOST;
     int derp_port = ML_DERP_PORT;
     bool region_in_map = false;
@@ -843,6 +847,11 @@ esp_err_t ml_derp_connect(microlink_t *ml) {
         }
     }
 
+#ifdef CONFIG_ML_NO_PSRAM
+    snprintf(host_copy, sizeof(host_copy), "%s", derp_host);
+    derp_host = host_copy;
+    xSemaphoreGive(ml->derp_map_mutex);
+#endif
     int64_t t_derp_start = esp_timer_get_time();
 
     ESP_LOGI(TAG, "Connecting to DERP %s:%d (region %d)",

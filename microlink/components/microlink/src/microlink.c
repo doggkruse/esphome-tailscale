@@ -360,10 +360,18 @@ microlink_t *microlink_init(const microlink_config_t *config) {
         ESP_LOGI(TAG, "Advertised routes from config: %s", ml->advertise_routes);
     }
 
+#ifdef CONFIG_ML_NO_PSRAM
+    ml->derp_map_mutex = xSemaphoreCreateMutex();
+    if (!ml->derp_map_mutex) { free(ml); return NULL; }
+#endif
+
     /* Create event group */
     ml->events = xEventGroupCreate();
     if (!ml->events) {
         ESP_LOGE(TAG, "Failed to create event group");
+#ifdef CONFIG_ML_NO_PSRAM
+        vSemaphoreDelete(ml->derp_map_mutex);
+#endif
         free(ml);
         return NULL;
     }
@@ -634,6 +642,11 @@ void microlink_destroy(microlink_t *ml) {
         ESP_LOGE(TAG, "Destroy skipped: a task still runs on this instance (leaked on purpose)");
         return;
     }
+#ifdef CONFIG_ML_NO_PSRAM
+    for (size_t i = 0; i < ML_MAX_DERP_REGIONS; ++i)
+        ml_derp_region_clear(&ml->derp_regions[i]);
+    if (ml->derp_map_mutex) vSemaphoreDelete(ml->derp_map_mutex);
+#endif
     /* Only now is everything the tasks owned quiescent. The DERP TLS state
      * and the long-poll accumulators (two PSRAM buffers of
      * ML_JSON_BUFFER_SIZE) were never released here before: every

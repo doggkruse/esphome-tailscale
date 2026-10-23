@@ -15,3 +15,7 @@ telemetry/.wrangler/
 
 # Local agent scratch — never commit
 .scratch/
+
+# Local validation environments and pytest cache
+.venv/
+.pytest_cache/
